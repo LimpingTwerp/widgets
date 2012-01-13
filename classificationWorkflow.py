@@ -9,7 +9,10 @@ from PyQt4.QtGui import QColor, QMainWindow, QApplication, QFileDialog, \
                         QMessageBox, qApp, QItemSelectionModel, QIcon, QTransform
 from PyQt4 import uic
 
+import lazyflow
+import lazyflow.graph
 from lazyflow.graph import Graph
+from lazyflow import graph
 from lazyflow.operators import Op5ToMulti, OpArrayCache, OpBlockedArrayCache, \
                                OpArrayPiper, OpPredictRandomForest, \
                                OpSingleChannelSelector, OpSparseLabelArray, \
@@ -315,7 +318,86 @@ class Main(QMainWindow):
                 self.addPredictionLayer(icl, self.labelListModel._labels[icl])
         self.StartClassificationButton.setEnabled(False)
         self.checkInteractive.setEnabled(True)
-                                    
+
+        f = open("/tmp/g.dot", 'w')
+        f.write("graph {")
+        #print self.g
+        #print self.g.operators
+
+        visitedOps = dict()
+        visitedMultiInputs = dict()
+        visitedMultiOutputs = dict()
+        visited = dict()
+
+        def recurse(operator):
+            if not visited.has_key(id(operator)):
+                visited[id(operator)] = True
+                if isinstance(operator, (graph.OperatorWrapper, lazyflow.graph.OperatorWrapper)):
+                    for o in operator.innerOperators:
+                        recurse(o)
+                if isinstance(operator, (graph.Operator, lazyflow.graph.Operator, lazyflow.graph.OperatorGroup, graph.OperatorGroup)):
+                    visitedOps[id(operator)] = operator
+                    for i in operator.inputs.values():
+                        if i.partner: 
+                            recurse(i.partner.operator)
+                    for o in operator.outputs.values():
+                        for p in o.partners:
+                            recurse(p.operator)
+                elif isinstance(operator, graph.MultiInputSlot):
+                    visitedMultiInputs[id(operator)] = operator
+                    for i in operator.inputSlots:
+                        recurse(i)
+                    if operator.operator:
+                        recurse(operator.operator)
+                elif isinstance(operator, graph.MultiOutputSlot):
+                    visitedMultiOutputs[id(operator)] = operator
+                    for i in operator.outputSlots:
+                        recurse(i)
+                    if operator.operator:
+                        recurse(operator.operator)
+                elif isinstance(operator, graph.InputSlot):
+                    if operator.operator:
+                        recurse(operator.operator)
+                elif isinstance(operator, graph.OutputSlot):
+                    if operator.operator:
+                        recurse(operator.operator)
+                else:
+                    raise RuntimeError(operator.__class__)
+
+        for o in self.g.operators:
+            recurse(o)
+
+        for o in visitedOps.values():
+            f.write("node_%d [shape=box, label=%s];\n" % (id(o), o.__class__.__name__))
+            for oname, oslot in o.outputs.iteritems():
+                f.write("node_%d [shape=diamond, label=%s];\n" % (id(oslot), oname))
+                print "    ", oname, oslot
+            for iname, islot in o.inputs.iteritems():
+                f.write("node_%d [shape=oval, label=%s];\n" % (id(islot), iname))
+            if isinstance(o, (lazyflow.graph.OperatorGroup, graph.OperatorGroup)):
+                for islot, iname in o._getInnerInputs().iteritems():
+                    f.write("node_%d [shape=oval, label=%s];\n" % (id(islot), iname))
+
+        for mis in visitedMultiInputs.values():
+            f.write("node_%d [shape=component, label=%s]" % (id(mis), mis.name))
+        for mos in visitedMultiOutputs.values():
+            f.write("node_%d [shape=tab, label=%s]" % (id(mos), mos.name))
+
+        f.write("\n")
+        for op in visitedOps.values():
+            for iname, islot in op.inputs.iteritems():
+                f.write("node_%d -- node_%d // %r -- %r\n" % (id(op), id(islot), op.__class__, islot.__class__))
+                if islot.partner:
+                    f.write("node_%d -- node_%d // %r -- %r\n" % (id(islot), id(islot.partner), islot.__class__, islot.partner.__class__))
+            for oname, oslot in op.outputs.iteritems():
+                f.write("node_%d -- node_%d // %r -- %r\n" % (id(op), id(oslot), op.__class__, oslot.__class__))
+                for p in oslot.partners:
+                    f.write("node_%d -- node_%d // %r -- %r\n" % (id(oslot), id(p), oslot.__class__, p.__class__))
+        f.write("\n")
+        f.write("}")
+
+        sys.exit(0)
+
     def addPredictionLayer(self, icl, ref_label):
         
         selector=OpSingleChannelSelector(self.g)
@@ -473,9 +555,11 @@ class Main(QMainWindow):
         opFeatureCache.inputs["fixAtCurrent"].setValue(False)  
         self.opFeatureCache=opFeatureCache
         
-        
         self.initLabels()
+        self.startClassification()
+
         self.dataReadyToView.emit()
+
         
     def initLabels(self):
         #Add the layer to draw the labels, but don't add any labels
